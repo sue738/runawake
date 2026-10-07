@@ -13,6 +13,7 @@
 - **Lid-closed mode (optional)** — keeps working with the lid shut, and puts the Mac to sleep as soon as the work ends.
 - **Safety guards** — stops keeping the Mac awake when it gets hot (stricter with the lid closed), when the battery drops to 20% (resumes when plugged in), and after 3 hours with the lid closed on battery.
 - **Wake summary** — a calm card when you come back: how long the lid was closed, what finished, what is still running.
+- **Animated menu bar icon** — equalizer bars bounce while something runs, sit flat when idle, and are crossed out when off. Six other styles (bouncing ball, heartbeat, spinning dots, orbit, breathing circle, progress stripes) are in the Icon menu.
 - **English and Japanese** — follows your system language.
 
 Supported agents:

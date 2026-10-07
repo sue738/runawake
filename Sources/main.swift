@@ -472,7 +472,11 @@ final class WakeNote {
 
 
 final class App: NSObject, NSApplicationDelegate {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    let item: NSStatusItem = {
+        let i = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        i.autosaveName = "runawake"
+        return i
+    }()
     var lidDisabled = false   // Whether pmset disablesleep is currently 1
     var lidMode: Bool {
         get { UserDefaults.standard.bool(forKey: "lid") }
@@ -568,30 +572,52 @@ final class App: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "wakeNote") }
     }
     var reasons: [String] = []
-    var pulsing = false
     // While keeping awake, slowly fade the icon in and out (breathing, not blinking). Can be turned off from the menu.
     var pulseEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "pulse") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "pulse") }
     }
 
-    func setPulse(_ on: Bool) {
+    /// Plays the icon animation while something runs. Frames go straight into a layer's contents,
+    /// which is far cheaper than swapping the status button's image (that re-lays out the menu bar each time).
+    var animTimer: Timer?
+    var animFrame = 0
+    var animLayer: CALayer?
+    var animCG: [CGImage] = []
+    var animCGDark: Bool?
+    var animCGFor = ""
+    /// Which character lives in the menu bar (menu: Icon).
+    var critter: Critter { Critter.named(UserDefaults.standard.string(forKey: "critter")) }
+    func setRunning(_ running: Bool, still: NSImage) {
         guard let button = item.button else { return }
-        button.wantsLayer = true
-        // Opening the menu etc. can rebuild the layer and drop the animation, so re-add it on each poll if missing
-        let running = button.layer?.animation(forKey: "pulse") != nil
-        pulsing = on
-        if on && !running {
-            let a = CABasicAnimation(keyPath: "opacity")
-            a.fromValue = 1.0; a.toValue = 0.5
-            a.duration = 1.25
-            a.autoreverses = true
-            a.repeatCount = .infinity
-            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            button.layer?.add(a, forKey: "pulse")
-        } else if !on && running {
-            button.layer?.removeAnimation(forKey: "pulse")
-            button.alphaValue = 1
+        if running && pulseEnabled {
+            let dark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            if animCGDark != dark || animCGFor != critter.id { animCG = critter.run.compactMap { Draw.tinted($0, dark ? .white : .black) }; animCGDark = dark; animCGFor = critter.id }
+            if animLayer == nil {
+                button.wantsLayer = true
+                let l = CALayer()
+                l.contentsGravity = .center
+                l.contentsScale = 2
+                button.layer?.addSublayer(l)
+                animLayer = l
+            }
+            button.image = Draw.blank
+            animLayer?.frame = button.bounds
+            animLayer?.isHidden = false
+            if animTimer == nil {
+                animTimer = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { [weak self] _ in
+                    guard let self, !self.animCG.isEmpty else { return }
+                    self.animFrame = (self.animFrame + 1) % self.animCG.count
+                    CATransaction.begin(); CATransaction.setDisableActions(true)
+                    self.animLayer?.contents = self.animCG[self.animFrame]
+                    CATransaction.commit()
+                }
+                RunLoop.main.add(animTimer!, forMode: .common)   // keep running while the menu is open
+            }
+        } else {
+            animTimer?.invalidate(); animTimer = nil
+            animLayer?.isHidden = true
+            button.image = running ? critter.run[min(2, critter.run.count - 1)] : still
         }
     }
 
@@ -696,22 +722,25 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func render() {
-        // Steaming cup while keeping awake, plain (cooled) cup when idle, moon when off (sleep allowed).
-        let symbol = paused ? "moon.zzz" : (holding ? "cup.and.heat.waves.fill" : "cup.and.saucer")
-        let fallback = paused ? "moon.zzz" : (holding ? "cup.and.saucer.fill" : "cup.and.saucer")  // macOS 13 and earlier
+        // The chosen icon: animated while something runs, still when idle, crossed out when off.
         let desc = "runawake: " + (paused ? T("オフ", "off") : (holding ? T("Mac を起こしています", "keeping your Mac awake") : T("待機中", "idle")))
-        let cfg = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
-        if let img = (NSImage(systemSymbolName: symbol, accessibilityDescription: desc) ?? NSImage(systemSymbolName: fallback, accessibilityDescription: desc))?.withSymbolConfiguration(cfg) {
-            item.button?.image = img
-            item.button?.title = ""
-        } else {
-            item.button?.title = paused ? "⏸" : (holding ? "☕" : "○")
-        }
+        item.button?.title = ""
         item.button?.toolTip = desc
-        setPulse(holding && !paused && pulseEnabled)
+        item.button?.setAccessibilityLabel(desc)
+        setRunning(holding && !paused, still: paused ? critter.off : critter.idle)
 
         let menu = NSMenu()
         func note(_ text: String) { menu.addItem(withTitle: text, action: nil, keyEquivalent: "") }
+        // Header: app icon + name + one-line description, so it is clear what this menu bar item is
+        let header = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        let icon = NSApp.applicationIconImage.copy() as! NSImage; icon.size = NSSize(width: 32, height: 32)
+        header.image = icon
+        let title = NSMutableAttributedString(string: "runawake\n", attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .semibold)])
+        title.append(NSAttributedString(string: T("動いている間だけ Mac を起こしておく", "Keeps your Mac awake only while things run"),
+                                        attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+        header.attributedTitle = title
+        menu.addItem(header)
+        menu.addItem(.separator())
         if paused {
             note(T("オフ: Mac は通常どおりスリープします", "Off: your Mac sleeps as usual"))
         } else if reasons.isEmpty {
@@ -747,10 +776,19 @@ final class App: NSObject, NSApplicationDelegate {
         heat.target = self
         heat.state = heatGuardEnabled ? .on : .off
         menu.addItem(heat)
-        let pulse = NSMenuItem(title: T("起こしている間はアイコンをゆっくり明滅させる", "Pulse the Icon While Awake"), action: #selector(togglePulse), keyEquivalent: "")
+        let pulse = NSMenuItem(title: T("動いている間はアイコンを動かす", "Animate the Icon While Awake"), action: #selector(togglePulse), keyEquivalent: "")
         pulse.target = self
         pulse.state = pulseEnabled ? .on : .off
         menu.addItem(pulse)
+        let pick = NSMenuItem(title: T("アイコン", "Icon"), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        for c in Critter.all {
+            let it = NSMenuItem(title: c.name, action: #selector(pickCritter(_:)), keyEquivalent: "")
+            it.target = self; it.representedObject = c.id; it.image = c.idle; it.state = c.id == critter.id ? .on : .off
+            sub.addItem(it)
+        }
+        pick.submenu = sub
+        menu.addItem(pick)
         let ign = NSMenuItem(title: T("見張らないコマンドを編集…", "Edit Ignored Commands…"), action: #selector(openIgnore), keyEquivalent: "")
         ign.target = self
         menu.addItem(ign)
@@ -760,6 +798,11 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     @objc func togglePause() { paused.toggle(); tick() }
+    @objc func pickCritter(_ sender: NSMenuItem) {
+        UserDefaults.standard.set(sender.representedObject as? String, forKey: "critter")
+        animTimer?.invalidate(); animTimer = nil; animFrame = 0
+        tick()
+    }
     @objc func togglePulse() { pulseEnabled.toggle(); render() }
     @objc func toggleHeatGuard() { heatGuardEnabled.toggle(); tick() }
     @objc func toggleWakeNote() { wakeNoteEnabled.toggle(); render() }
@@ -805,6 +848,13 @@ if CommandLine.arguments.contains("--once") {
 }
 
 let app = NSApplication.shared
+// Place the icon near the right end of the menu bar (next to Control Center) on first launch, so it is not
+// pushed under the notch when the menu bar is crowded. After that, wherever the user ⌘-drags it is remembered.
+let positionKey = "NSStatusItem Preferred Position runawake"
+if UserDefaults.standard.object(forKey: positionKey) == nil || UserDefaults.standard.bool(forKey: "positionReset") == false {
+    UserDefaults.standard.set(1.0, forKey: positionKey)
+    UserDefaults.standard.set(true, forKey: "positionReset")
+}
 let delegate = App()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

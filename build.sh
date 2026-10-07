@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 APP=build/runawake.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp assets/runawake.icns "$APP/Contents/Resources/"
-swiftc -O Sources/main.swift -o "$APP/Contents/MacOS/runawake"
+swiftc -O Sources/main.swift Sources/critters.swift -o "$APP/Contents/MacOS/runawake"
 cat > "$APP/Contents/Info.plist" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

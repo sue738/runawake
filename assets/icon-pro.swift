@@ -92,7 +92,28 @@ func tileFinish() {
 }
 
 typealias Painter = () -> Void
+/// Equalizer bars (the menu bar icon) on a dusk tile, so the app icon and the menu bar animation read as one.
+func equalizerTile() {
+    let t = tilePath()
+    withShadow(NSColor(white: 0, alpha: 0.35), blur: 30, dy: -12) { linear(t, [hex(0x2C3A6E), hex(0x1A1D3F), hex(0x140F26)], angle: -90) }
+    clipped(t) {
+        radial(NSPoint(x: 512, y: 260), 520, hex(0x7A5A9A, 0.40), hex(0x7A5A9A, 0))
+        stars(seed: 5, count: 22, area: NSRect(x: 130, y: 640, width: 760, height: 260), color: .white)
+    }
+    // four rounded bars, heights like a frame of the menu bar animation
+    let heights: [CGFloat] = [210, 420, 300, 500]
+    let w: CGFloat = 92, gap: CGFloat = 46, base: CGFloat = 250
+    let x0 = 512 - (4 * w + 3 * gap) / 2
+    for (k, h) in heights.enumerated() {
+        let r = NSRect(x: x0 + CGFloat(k) * (w + gap), y: base, width: w, height: h)
+        let bar = NSBezierPath(roundedRect: r, xRadius: w / 2, yRadius: w / 2)
+        withShadow(hex(0xFFD58A, 0.55), blur: 50, dy: 0) { linear(bar, [hex(0xFFF3D6), hex(0xFFD58A)], angle: -90) }
+    }
+    tileFinish()
+}
+
 let designs: [(String, Painter)] = [
+    ("E1 Equalizer", { equalizerTile() }),
     ("P1 Dusk Gnome", {
         let t = tilePath()
         withShadow(NSColor(white: 0, alpha: 0.35), blur: 30, dy: -12) { linear(t, [hex(0x2C3A6E), hex(0x1A1D3F), hex(0x140F26)], angle: -90) }
