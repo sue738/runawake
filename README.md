@@ -11,7 +11,7 @@
 - **Only while something runs** — AI agents while they are responding, and any foreground terminal command (rsync, builds, scripts…). Idle sessions do not keep the Mac awake.
 - **Hooks optional** — works out of the box with CPU heuristics. Once an agent's hooks are seen firing, runawake switches to exact start/stop detection for that agent.
 - **Lid-closed mode (optional)** — keeps working with the lid shut, and puts the Mac to sleep as soon as the work ends.
-- **Heat guard** — stops keeping the Mac awake when macOS reports a serious thermal state; resumes after 5 minutes of cooling.
+- **Safety guards** — stops keeping the Mac awake when it gets hot (stricter with the lid closed), when the battery drops to 20% (resumes when plugged in), and after 3 hours with the lid closed on battery.
 - **Wake summary** — a calm card when you come back: how long the lid was closed, what finished, what is still running.
 - **English and Japanese** — follows your system language.
 
@@ -51,7 +51,7 @@ Mind heat and battery when the Mac runs in a bag. Other tools that toggle `disab
 |---|---|
 | Agents with hooks | Hooks drop a "busy" marker in `~/.runawake/busy/` on prompt submit and remove it on stop. Markers are dropped when the agent process exits or after 20 minutes without an update. |
 | Agents without hooks | CPU time of the agent's process tree, for sessions open in a terminal. Stays awake for 10 minutes after the last activity, since waiting on an API uses no CPU. |
-| Terminal commands | Whatever runs in the foreground of a terminal, except names listed in `~/.runawake/ignore`. |
+| Terminal commands | Whatever runs in the foreground of a terminal and used CPU in the last 10 minutes (so a `cat` waiting for input does not count), except names listed in `~/.runawake/ignore`. |
 
 State changes are logged to `~/.runawake/log`. Try the wake card with `runawake --demo-wake` (add `--slept` for the asleep variant, or use `--demo-wake-png <path>` to render it to an image).
 

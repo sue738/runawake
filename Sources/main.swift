@@ -5,6 +5,7 @@
 // Sessions that are merely open and waiting are not counted.
 import Cocoa
 import IOKit.pwr_mgt
+import IOKit.ps
 
 let pollSeconds: TimeInterval = 5
 // Display language: Japanese if the system's primary language is Japanese, otherwise English (override with `defaults write local.runawake lang en` or the launch argument `-lang en`)
@@ -154,6 +155,9 @@ func describe(who: String, what: String, place: String?) -> String {
 final class Detector {
     var lastTreeCPU: [Int32: Double] = [:]
     var lastActive: [Int32: Date] = [:]
+    var termCPU: [Int32: Double] = [:]
+    var termActive: [Int32: Date] = [:]
+    var termFirstSeen: [Int32: Date] = [:]
     /// Whether Capsomnia is running. It keeps resetting disablesleep to 0 while Caps Lock is OFF, which conflicts with lid mode.
     var capsomniaRunning = false
 
@@ -195,11 +199,24 @@ final class Detector {
         lastActive = lastActive.filter { alive.contains($0.key) }
 
         // Commands running in the terminal foreground (excluding agents and their descendants)
+        // A foreground command counts only while it actually does something: it used CPU in the last
+        // 10 minutes, or it started less than 10 minutes ago. A `cat` or `read` waiting for input forever does not count.
         var seen: [String: String] = [:]
+        var termAlive = Set<Int32>()
         for p in procs where p.stat.contains("+") && p.tty.hasPrefix("tty") {
             if seen[p.tty] != nil || ignore.contains(p.name) || p.agent != nil || agentAncestor(p) != nil { continue }
+            termAlive.insert(p.pid)
+            let cpu = treeCPU(p.pid)
+            if termFirstSeen[p.pid] == nil { termFirstSeen[p.pid] = now }
+            if let prev = termCPU[p.pid], cpu - prev >= 0.05 { termActive[p.pid] = now }
+            termCPU[p.pid] = cpu
+            let recent = [termFirstSeen[p.pid], termActive[p.pid]].compactMap { $0 }.contains { now.timeIntervalSince($0) < cpuHoldSeconds }
+            if !recent { continue }
             seen[p.tty] = describe(who: T("ターミナルで ", ""), what: T("\(p.name) を実行中", "\(p.name) running in Terminal"), place: cwd(of: p.pid).flatMap(shortPath))
         }
+        termCPU = termCPU.filter { termAlive.contains($0.key) }
+        termActive = termActive.filter { termAlive.contains($0.key) }
+        termFirstSeen = termFirstSeen.filter { termAlive.contains($0.key) }
         return reasons + seen.sorted { $0.key < $1.key }.map { $0.value }
     }
 }
@@ -483,17 +500,63 @@ final class App: NSObject, NSApplicationDelegate {
         if let v = UserDefaults.standard.object(forKey: "thermalOverride") as? Int, let t = ProcessInfo.ThermalState(rawValue: v) { return t }
         return ProcessInfo.processInfo.thermalState
     }
+    /// Battery level (0-100) and whether the Mac runs on battery. nil when there is no battery.
+    func battery() -> (percent: Int, onBattery: Bool)? {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
+        for ps in list {
+            guard let d = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any],
+                  let cur = d[kIOPSCurrentCapacityKey] as? Int, let max = d[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
+            let onBattery = (d[kIOPSPowerSourceStateKey] as? String) == kIOPSBatteryPowerValue
+            return (cur * 100 / max, onBattery)
+        }
+        return nil
+    }
+    /// Hard cap: with the lid closed on battery, stop after 3 hours no matter what is "running".
+    var lidOnBatterySince: Date?
+    var capped = false
+    func checkLidCap() {
+        let closedOnBattery = lidClosed() && NSScreen.screens.isEmpty && (battery()?.onBattery ?? false)
+        if closedOnBattery {
+            if lidOnBatterySince == nil { lidOnBatterySince = Date() }
+            if !capped, Date().timeIntervalSince(lidOnBatterySince!) >= 3 * 3600 {
+                capped = true
+                logLine(T("上限: 蓋を閉じて電池で3時間たったので、起こすのをやめる", "Limit: 3 hours with the lid closed on battery, stopped keeping awake"))
+            }
+        } else {
+            lidOnBatterySince = nil
+            if capped { capped = false }
+        }
+    }
+    var lowBattery = false
+    var lowBatteryAt: Date?
+    var batteryFloor: Int { (UserDefaults.standard.object(forKey: "batteryFloor") as? Int) ?? 20 }
+    /// On battery at or below the floor: stop keeping the Mac awake. Resumes when plugged in.
+    func checkBattery() {
+        guard let b = battery() else { lowBattery = false; return }
+        if b.onBattery && b.percent <= batteryFloor {
+            if !lowBattery {
+                lowBattery = true; lowBatteryAt = Date()
+                logLine(T("電池の見張り: 電池が \(b.percent)% になったので、起こすのをやめる", "Battery guard: battery at \(b.percent)%, stopped keeping awake"))
+            }
+        } else if lowBattery && !b.onBattery {
+            lowBattery = false; logLine(T("電池の見張り: 電源につながったので再開", "Battery guard: plugged in, resuming"))
+        }
+    }
+
     func checkHeat() {
         guard heatGuardEnabled else { overheated = false; return }
         let t = thermal
-        if t.rawValue >= ProcessInfo.ThermalState.serious.rawValue {
+        // With the lid closed (e.g. in a bag) the Mac cools poorly, so stop already at "fair"
+        let limit: ProcessInfo.ThermalState = (lidClosed() && NSScreen.screens.isEmpty) ? .fair : .serious
+        if t.rawValue >= limit.rawValue {
             coolSince = nil
             if !overheated {
                 overheated = true; heatStoppedAt = Date()
                 logLine(T("熱の見張り: Mac が熱くなった(熱状態=\(t.rawValue))ので、起こすのをやめて休ませる", "Heat guard: Mac got hot (thermal state=\(t.rawValue)), stopped keeping awake to let it rest"))
             }
         } else if overheated {
-            if t == .nominal || t == .fair {
+            if t.rawValue < limit.rawValue {
                 if coolSince == nil { coolSince = Date() }
                 if Date().timeIntervalSince(coolSince!) >= 5 * 60 { overheated = false; coolSince = nil; logLine(T("熱の見張り: 冷えたので再開", "Heat guard: cooled down, resuming")) }
             } else { coolSince = nil }
@@ -584,7 +647,9 @@ final class App: NSObject, NSApplicationDelegate {
     func tick() {
         reasons = paused ? [] : merged(busyMarkedAgents() + detector.scan(ignore: loadIgnore()))
         checkHeat()
-        setHold(!reasons.isEmpty && !overheated)
+        checkBattery()
+        checkLidCap()
+        setHold(!reasons.isEmpty && !overheated && !lowBattery && !capped)
         applyLid()
         // Lid closed with no external display counts as "away". (Using clamshell mode with an external display is not away)
         let closedAway = lidClosed() && NSScreen.screens.isEmpty
@@ -655,6 +720,9 @@ final class App: NSObject, NSApplicationDelegate {
         } else {
             note(holding ? T("Mac を起こしています(\(reasons.count)件)", "Keeping your Mac awake (\(reasons.count))") : T("Mac を起こそうとしています", "Trying to keep your Mac awake"))
             for r in reasons { note("    " + r) }
+        }
+        if lowBattery {
+            note(T("電池が \(batteryFloor)% を切ったため止めています(電源につなぐと再開します)", "Battery below \(batteryFloor)% — paused until you plug in"))
         }
         if overheated {
             note(T("Mac が熱くなったため休ませています(冷えたら再開します)", "Your Mac is hot — resting until it cools down"))
