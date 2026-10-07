@@ -629,6 +629,11 @@ final class App: NSObject, NSApplicationDelegate {
         tick()
         Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { [weak self] _ in self?.tick() }
         NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in self?.tick() }
+        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            guard let self, let r = self.pendingReport else { return }
+            self.pendingReport = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.wakeNote.show(r) }
+        }
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.beginAway(slept: true) }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -661,8 +666,18 @@ final class App: NSObject, NSApplicationDelegate {
         awayStart = nil
         logLine((awaySlept ? T("復帰", "Woke") : T("蓋を開けた", "Lid opened")) + T(" (\(mins)分)", " (\(mins) min)"))
         guard wakeNoteEnabled, mins >= 1 else { return }
-        wakeNote.show(WakeReport(from: start, to: Date(), minutes: mins, slept: awaySlept, before: awaySnapshot, now: demoNow ?? reasons,
-                                 heatStop: heatStoppedAt.flatMap { $0 >= start ? $0 : nil }))
+        let report = WakeReport(from: start, to: Date(), minutes: mins, slept: awaySlept, before: awaySnapshot, now: demoNow ?? reasons,
+                                 heatStop: heatStoppedAt.flatMap { $0 >= start ? $0 : nil })
+        // On wake the lock screen comes first, and typing the password would dismiss the card at once.
+        // So while the screen is locked, keep the card and show it right after the unlock.
+        if screenIsLocked() { pendingReport = report; logLine(T("復帰のお知らせ: ロック解除を待つ", "Wake summary: waiting for unlock")) }
+        else { wakeNote.show(report) }
+    }
+
+    var pendingReport: WakeReport?
+    func screenIsLocked() -> Bool {
+        guard let d = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (d["CGSSessionScreenIsLocked"] as? Bool) ?? false
     }
 
     func applicationWillTerminate(_ n: Notification) {
