@@ -1,0 +1,68 @@
+#!/usr/bin/python3 -I
+# Called from AI agent hooks. Puts a busy mark at ~/.runawake/busy/<agent>-<session>; runawake.app watches it and prevents sleep.
+#   runawake-mark busy <agent> [stdout]   response started / after a tool run
+#   runawake-mark idle <agent> [stdout]   response finished
+# Writes the reply the hook expects (usually "{}") to stdout. The mark holds the pid of the agent (nearest non-shell ancestor),
+# so the app can discard it if the agent dies without sending idle.
+import json, os, re, subprocess, sys
+
+mode = sys.argv[1] if len(sys.argv) > 1 else "busy"
+agent = sys.argv[2] if len(sys.argv) > 2 else "agent"
+reply = sys.argv[3] if len(sys.argv) > 3 else ""
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+
+sid = next((str(data[k]) for k in ("session_id", "sessionId", "conversation_id", "conversationId", "sessionID") if data.get(k)), "")
+roots = data.get("workspace_roots") or data.get("workspacePaths") or []
+cwd = data.get("cwd") or (roots[0] if roots else "") or os.environ.get("PWD", "")
+
+SHELLS = {"sh", "bash", "zsh", "dash", "fish", "env", "python3", "Python", "python", "timeout", "nohup", "runawake-mark"}
+
+
+def ancestor_pid():
+    pid = os.getppid()
+    for _ in range(10):
+        if pid <= 1:
+            break
+        try:
+            out = subprocess.run(["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+        except Exception:
+            break
+        m = re.match(r"\s*(\d+)\s+(.*)", out)
+        if not m:
+            break
+        name = os.path.basename(m.group(2).split(" ")[0]).lstrip("-")
+        if name not in SHELLS:
+            return pid
+        pid = int(m.group(1))
+    return os.getppid()
+
+
+# Getting here means this agent's hooks work (the app uses this to switch from CPU detection to hook detection)
+try:
+    ok = os.path.expanduser("~/.runawake/hooks-ok")
+    os.makedirs(ok, exist_ok=True)
+    open(os.path.join(ok, re.sub(r"[^A-Za-z0-9._-]", "_", agent)), "w").close()
+except OSError:
+    pass
+
+if sid:
+    d = os.path.expanduser("~/.runawake/busy")
+    os.makedirs(d, exist_ok=True)
+    f = os.path.join(d, re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:200])
+    if mode == "idle":
+        try:
+            os.remove(f)
+        except FileNotFoundError:
+            pass
+    else:
+        with open(f, "w") as fh:
+            fh.write(f"{ancestor_pid()}\t{agent}\t{cwd}\n")
+
+if reply:
+    sys.stdout.write(reply)
