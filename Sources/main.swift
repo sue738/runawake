@@ -269,6 +269,17 @@ enum Lid {
     }
 }
 
+/// Lid closed with no external display: the Mac is in a bag or on a desk unattended.
+/// Uses the online display list rather than NSScreen, which can still list the built-in panel while it is off.
+/// `defaults write local.runawake lidTest -bool true` pretends the lid is closed (for testing; never sleeps the Mac).
+func closedAway() -> Bool {
+    if UserDefaults.standard.bool(forKey: "lidTest") { return true }
+    guard lidClosed() else { return false }
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+    guard CGGetOnlineDisplayList(16, &ids, &n) == .success else { return NSScreen.screens.isEmpty }
+    return !ids.prefix(Int(n)).contains { CGDisplayIsBuiltin($0) == 0 && CGDisplayIsAsleep($0) == 0 }
+}
+
 /// Whether the lid is closed (AppleClamshellState of IOPMrootDomain).
 func lidClosed() -> Bool {
     let entry = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
@@ -521,7 +532,7 @@ final class App: NSObject, NSApplicationDelegate {
     var lidOnBatterySince: Date?
     var capped = false
     func checkLidCap() {
-        let closedOnBattery = lidClosed() && NSScreen.screens.isEmpty && (battery()?.onBattery ?? false)
+        let closedOnBattery = closedAway() && (battery()?.onBattery ?? false)
         if closedOnBattery {
             if lidOnBatterySince == nil { lidOnBatterySince = Date() }
             if !capped, Date().timeIntervalSince(lidOnBatterySince!) >= 3 * 3600 {
@@ -540,6 +551,9 @@ final class App: NSObject, NSApplicationDelegate {
     let netMonitor = NWPathMonitor()
     var offlineSince: Date?
     var offlineLong: Bool { offlineSince.map { Date().timeIntervalSince($0) >= 10 * 60 } ?? false }
+    /// With the lid closed, losing the network for 3 minutes means "on the move": stop and let the Mac sleep.
+    var offlineClosed: Bool { closedAway() && (offlineSince.map { Date().timeIntervalSince($0) >= 3 * 60 } ?? false) }
+    var loggedOfflineClosed = false
     var loggedOffline = false
     var batteryFloor: Int { (UserDefaults.standard.object(forKey: "batteryFloor") as? Int) ?? 20 }
     /// On battery at or below the floor: stop keeping the Mac awake. Resumes when plugged in.
@@ -559,7 +573,7 @@ final class App: NSObject, NSApplicationDelegate {
         guard heatGuardEnabled else { overheated = false; return }
         let t = thermal
         // With the lid closed (e.g. in a bag) the Mac cools poorly, so stop already at "fair"
-        let limit: ProcessInfo.ThermalState = (lidClosed() && NSScreen.screens.isEmpty) ? .fair : .serious
+        let limit: ProcessInfo.ThermalState = (closedAway()) ? .fair : .serious
         if t.rawValue >= limit.rawValue {
             coolSince = nil
             if !overheated {
@@ -636,7 +650,7 @@ final class App: NSObject, NSApplicationDelegate {
         netMonitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if path.status == .satisfied {
+                if path.status == .satisfied && !UserDefaults.standard.bool(forKey: "offlineTest") {
                     if self.loggedOffline { logLine(T("ネット: つながったので AI エージェントも数える", "Network: back online, counting AI agents again")) }
                     self.offlineSince = nil; self.loggedOffline = false
                 } else if self.offlineSince == nil { self.offlineSince = Date() }
@@ -709,13 +723,18 @@ final class App: NSObject, NSApplicationDelegate {
             found = found.filter { $0.contains(T("ターミナル", "in Terminal")) }
         }
         reasons = paused ? [] : merged(found)
+        if UserDefaults.standard.bool(forKey: "offlineTest") { offlineSince = Date().addingTimeInterval(-11 * 60) }
         checkHeat()
         checkBattery()
         checkLidCap()
-        setHold(!reasons.isEmpty && !overheated && !lowBattery && !capped)
+        if offlineClosed != loggedOfflineClosed {
+            loggedOfflineClosed = offlineClosed
+            if offlineClosed { logLine(T("ネット: 蓋を閉じたまま3分つながらないので、止めて寝かせる", "Network: offline for 3 minutes with the lid closed, stopping so the Mac sleeps")) }
+        }
+        setHold(!reasons.isEmpty && !overheated && !lowBattery && !capped && !offlineClosed)
         applyLid()
         // Lid closed with no external display counts as "away". (Using clamshell mode with an external display is not away)
-        let closedAway = lidClosed() && NSScreen.screens.isEmpty
+        let closedAway = closedAway()
         if closedAway, awayStart == nil { beginAway(slept: false) }
         if !closedAway, awayStart != nil, !awaySlept { endAway() }
         render()
@@ -734,7 +753,7 @@ final class App: NSObject, NSApplicationDelegate {
             lidDisabled = want
             logLine(want ? T("蓋モード: 蓋を閉じても寝ないようにした", "Lid mode: Mac will stay awake with the lid closed") : T("蓋モード: 通常に戻した", "Lid mode: back to normal"))
             // If work finishes with the lid closed, macOS won't trigger lid-closed sleep again, so put it to sleep ourselves
-            if !want && lidClosed() && NSScreen.screens.isEmpty {
+            if !want && closedAway() && !UserDefaults.standard.bool(forKey: "lidTest") {
                 logLine(T("作業が終わり蓋が閉じているので、スリープさせる", "Work finished with the lid closed, putting Mac to sleep"))
                 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset"); p.arguments = ["sleepnow"]
                 try? p.run()
