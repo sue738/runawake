@@ -224,6 +224,7 @@ final class Detector {
 
 /// Log state changes to ~/.runawake/log, one per line (recreated when over 1MB).
 func logLine(_ text: String) {
+    if CommandLine.arguments.contains("--demo-wake") || CommandLine.arguments.contains("--demo-wake-png") { return }
     let dir = NSHomeDirectory() + "/.runawake", path = dir + "/log"
     let fm = FileManager.default
     try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
@@ -280,6 +281,22 @@ func closedAway() -> Bool {
     return !ids.prefix(Int(n)).contains { CGDisplayIsBuiltin($0) == 0 && CGDisplayIsAsleep($0) == 0 }
 }
 
+/// Lid closed and no external display online at all (asleep or not). Used for putting the Mac to sleep
+/// and for the wake card, where a docked Mac whose external display merely went to sleep must not count.
+func closedNoExternal() -> Bool {
+    if UserDefaults.standard.bool(forKey: "lidTest") { return true }
+    guard lidClosed() else { return false }
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+    guard CGGetOnlineDisplayList(16, &ids, &n) == .success else { return NSScreen.screens.isEmpty }
+    return !ids.prefix(Int(n)).contains { CGDisplayIsBuiltin($0) == 0 }
+}
+/// Any external display that is on (so someone is at a desk with this Mac).
+func externalDisplayAwake() -> Bool {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), n: UInt32 = 0
+    guard CGGetOnlineDisplayList(16, &ids, &n) == .success else { return false }
+    return ids.prefix(Int(n)).contains { CGDisplayIsBuiltin($0) == 0 && CGDisplayIsAsleep($0) == 0 }
+}
+
 /// Whether the lid is closed (AppleClamshellState of IOPMrootDomain).
 func lidClosed() -> Bool {
     let entry = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
@@ -292,7 +309,10 @@ func lidClosed() -> Bool {
 /// When the lid opens or the Mac wakes, show a card in the center of the screen about what happened while closed. Moving the mouse dismisses it.
 struct WakeReport {
     let from: Date, to: Date, minutes: Int
-    let slept: Bool               // true: was asleep (work paused) / false: stayed awake and worked
+    let slept: Bool               // the Mac slept at some point while away
+    var worked = false            // runawake kept it awake for part of the time (so "finished" is meaningful)
+    var sleptAt: Date? = nil      // when it fell asleep, if it worked first
+    var lidWasClosed = true       // false: it idle-slept with the lid open
     let before: [String]          // What was running just before closing
     let now: [String]             // What is running now
     var heatStop: Date? = nil     // When it stopped midway due to heat
@@ -347,7 +367,8 @@ final class WakeNote {
             parts[0] = w
             return parts.joined(separator: " — ")
         }
-        let finished = r.before.filter { !nowKeys.contains(key($0)) }.map(past)
+        // Nothing ran while asleep, so nothing can have finished; everything from before is simply paused.
+        let finished = (r.slept && !r.worked) ? [] : r.before.filter { !nowKeys.contains(key($0)) }.map(past)
         let running = r.now
 
         var rows: [(NSView, CGFloat, CGFloat)] = []   // (view, height, top margin)
@@ -368,14 +389,18 @@ final class WakeNote {
         num.textColor = .labelColor; num.sizeToFit()
         num.frame.origin = NSPoint(x: 0, y: 0)
         head.addSubview(num)
-        let unit = text(T("分、閉じていました", "min with the lid closed"), size: 14, weight: .medium, color: .secondaryLabelColor, w: innerW - num.frame.width - 50)
+        let unit = text(r.lidWasClosed ? T("分、閉じていました", "min with the lid closed") : T("分、眠っていました", "min asleep"), size: 14, weight: .medium, color: .secondaryLabelColor, w: innerW - num.frame.width - 50)
         unit.frame.origin = NSPoint(x: num.frame.width + 4, y: 8)
         head.addSubview(unit)
         let icon = NSImageView(frame: NSRect(x: innerW - 30, y: 14, width: 30, height: 30))
         icon.image = NSApp.applicationIconImage; icon.alphaValue = 0.9
         head.addSubview(icon)
         rows.append((head, 48, 0))
-        let sub = text("\(f.string(from: r.from)) – \(f.string(from: r.to))　·　" + (r.slept ? T("Mac は眠っていたため、作業は止まっていました", "Your Mac was asleep, so work was paused") : T("Mac は起きたまま作業を続けていました", "Your Mac stayed awake and kept working")),
+        let note: String
+        if !r.slept { note = T("Mac は起きたまま作業を続けていました", "Your Mac stayed awake and kept working") }
+        else if r.worked, let at = r.sleptAt { note = T("\(f.string(from: at)) まで作業し、終わってから眠りました", "Worked until \(f.string(from: at)), then went to sleep") }
+        else { note = T("Mac は眠っていたため、作業は止まっていました", "Your Mac was asleep, so work was paused") }
+        let sub = text("\(f.string(from: r.from)) – \(f.string(from: r.to))　·　" + note,
                        size: 12, color: .secondaryLabelColor, w: innerW)
         rows.append((sub, sub.frame.height, 4))
         let line = NSBox(); line.boxType = .custom; line.borderWidth = 0; line.fillColor = NSColor.white.withAlphaComponent(0.10)
@@ -414,8 +439,10 @@ final class WakeNote {
             rows.append((warn, warn.frame.height, 12))
         }
         section(T("終わったもの", "Finished"), finished, symbol: "checkmark")
-        section(r.slept ? T("まだ終わっていないもの(閉じている間は止まっていました)", "Not finished (paused while closed)") : T("まだ動いているもの", "Still running"), running, symbol: "circle.dotted")
-        if finished.isEmpty && running.isEmpty {
+        let paused = r.slept && !r.worked
+        section(paused ? T("まだ終わっていないもの(閉じている間は止まっていました)", "Not finished (paused while closed)") : T("まだ動いているもの", "Still running"),
+                paused ? Array(Set(r.before + running)).sorted() : running, symbol: "circle.dotted")
+        if finished.isEmpty && running.isEmpty && !(paused && !r.before.isEmpty) {
             let none = text(T("動いていたものはありません", "Nothing was running"), size: 13, color: .secondaryLabelColor, w: innerW)
             rows.append((none, none.frame.height, 14))
         }
@@ -502,7 +529,15 @@ final class App: NSObject, NSApplicationDelegate {
     var awayStart: Date?          // When the lid closed / Mac slept
     var awaySnapshot: [String] = []
     var awaySlept = false
+    var awayWorked = false        // we held the Mac awake at some point during this away period
+    var awaySleptAt: Date?
+    var awayLidClosed = false
     var demoNow: [String]?
+    /// Between willSleep and didWake. Maintenance (dark) wakes run our timer too; holding or setting disablesleep then
+    /// would keep a closed Mac awake in a bag. So while "sleeping", never hold.
+    var sleeping = false
+    var lidCheckAt = Date.distantPast
+    let isDemo = CommandLine.arguments.contains("--demo-wake") || CommandLine.arguments.contains("--demo-wake-png")
     // Heat guard: stop keeping awake when macOS thermal state reaches "serious" or higher. Resume only after 5 min back at "nominal"
     var overheated = false
     var heatStoppedAt: Date?
@@ -593,6 +628,7 @@ final class App: NSObject, NSApplicationDelegate {
         set { UserDefaults.standard.set(newValue, forKey: "wakeNote") }
     }
     var reasons: [String] = []
+    var menuSignature = ""
     // While keeping awake, slowly fade the icon in and out (breathing, not blinking). Can be turned off from the menu.
     var pulseEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "pulse") as? Bool ?? true }
@@ -643,8 +679,26 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        logLine(T("起動", "Started"))
         if let url = Bundle.main.url(forResource: "runawake", withExtension: "icns"), let img = NSImage(contentsOf: url) { NSApp.applicationIconImage = img }
+        if isDemo {
+            // The demo only renders the card. It must not touch sleep settings, hold assertions or show a second menu bar icon.
+            item.isVisible = false
+            awayStart = Date().addingTimeInterval(-46 * 60); awaySlept = CommandLine.arguments.contains("--slept"); awayLidClosed = true
+            if CommandLine.arguments.contains("--worked") { awayWorked = true; awaySleptAt = Date().addingTimeInterval(-12 * 60) }
+            if CommandLine.arguments.contains("--heat") { heatStoppedAt = Date().addingTimeInterval(-20 * 60) }
+            awaySnapshot = [T("ターミナルで rsync を実行中", "rsync running in Terminal") + " — ~/backup", "Claude Code" + T(" が作業中", " working") + " — ~/src/myapp", "Codex" + T(" が作業中", " working") + " — ~/src/api"]
+            // The demo shows a fixed example rather than the real state (so local paths don't appear in the image)
+            demoNow = awaySlept ? [] : ["Claude Code" + T(" が作業中", " working") + " — ~/src/myapp", "Codex" + T(" が作業中", " working") + " — ~/src/api"]
+            endAway()
+            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in if self?.wakeNote.panel == nil { NSApp.terminate(nil) } }
+            return
+        }
+        logLine(T("起動", "Started"))
+        // Quit via SIGTERM (launchctl bootout, pkill) skips applicationWillTerminate, so reset disablesleep here too
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { [weak self] in if self?.lidDisabled == true { Lid.set(false) }; logLine(T("終了(SIGTERM)", "Quit (SIGTERM)")); exit(0) }
+        term.resume(); sigterm = term
         // If disablesleep was left on after a previous crash, reset it
         if lidMode, Lid.set(false) { logLine(T("蓋モード: 起動時に disablesleep を 0 に戻した", "Lid mode: reset disablesleep to 0 at startup")) }
         netMonitor.pathUpdateHandler = { [weak self] path in
@@ -666,27 +720,28 @@ final class App: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.wakeNote.show(r) }
         }
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in self?.beginAway(slept: true) }
+        nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.sleeping = true
+            self.beginAway(slept: true)
+            // Release everything now so a maintenance wake cannot pick it back up
+            self.setHold(false); self.applyLid()
+        }
         nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.sleeping = false
             // Marks and process states shift right after wake, so wait a bit before polling
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self?.tick(); self?.endAway() }
-        }
-        if CommandLine.arguments.contains("--demo-wake") || CommandLine.arguments.contains("--demo-wake-png") {
-            awayStart = Date().addingTimeInterval(-46 * 60); awaySlept = CommandLine.arguments.contains("--slept")
-            if CommandLine.arguments.contains("--heat") { heatStoppedAt = Date().addingTimeInterval(-20 * 60) }
-            awaySnapshot = [T("ターミナルで rsync を実行中", "rsync running in Terminal") + " — ~/backup", "Claude Code" + T(" が作業中", " working") + " — ~/src/myapp", "Codex" + T(" が作業中", " working") + " — ~/src/api"]
-            // The demo shows a fixed example rather than the real state (so local paths don't appear in the image)
-            demoNow = ["Claude Code" + T(" が作業中", " working") + " — ~/src/myapp", "Codex" + T(" が作業中", " working") + " — ~/src/api"]
-            endAway()
-            // The demo exits once the card is dismissed (runs separately from the resident instance)
-            Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in if self?.wakeNote.panel == nil { NSApp.terminate(nil) } }
         }
     }
 
     /// Lid closed (no external display) or Mac slept. Record what was going on.
     func beginAway(slept: Bool) {
-        guard awayStart == nil else { if slept { awaySlept = true }; return }
+        guard awayStart == nil else {
+            if slept, !awaySlept { awaySlept = true; awaySleptAt = Date(); logLine(T("スリープへ", "Going to sleep")) }
+            return
+        }
         awayStart = Date(); awaySlept = slept; awaySnapshot = reasons
+        awayWorked = false; awaySleptAt = nil; awayLidClosed = !slept
         logLine((slept ? T("スリープへ", "Going to sleep") : T("蓋を閉じた", "Lid closed")) + T(" — 動いていたもの: ", " — running: ") + (reasons.isEmpty ? T("なし", "none") : reasons.joined(separator: " / ")))
     }
 
@@ -697,7 +752,8 @@ final class App: NSObject, NSApplicationDelegate {
         awayStart = nil
         logLine((awaySlept ? T("復帰", "Woke") : T("蓋を開けた", "Lid opened")) + T(" (\(mins)分)", " (\(mins) min)"))
         guard wakeNoteEnabled, mins >= 1 else { return }
-        let report = WakeReport(from: start, to: Date(), minutes: mins, slept: awaySlept, before: awaySnapshot, now: demoNow ?? reasons,
+        let report = WakeReport(from: start, to: Date(), minutes: mins, slept: awaySlept, worked: awayWorked, sleptAt: awaySleptAt,
+                                 lidWasClosed: awayLidClosed, before: awaySnapshot, now: demoNow ?? reasons,
                                  heatStop: heatStoppedAt.flatMap { $0 >= start ? $0 : nil })
         // On wake the lock screen comes first, and typing the password would dismiss the card at once.
         // So while the screen is locked, keep the card and show it right after the unlock.
@@ -706,6 +762,7 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     var pendingReport: WakeReport?
+    var sigterm: DispatchSourceSignal?
     func screenIsLocked() -> Bool {
         guard let d = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (d["CGSSessionScreenIsLocked"] as? Bool) ?? false
@@ -731,12 +788,16 @@ final class App: NSObject, NSApplicationDelegate {
             loggedOfflineClosed = offlineClosed
             if offlineClosed { logLine(T("ネット: 蓋を閉じたまま3分つながらないので、止めて寝かせる", "Network: offline for 3 minutes with the lid closed, stopping so the Mac sleeps")) }
         }
-        setHold(!reasons.isEmpty && !overheated && !lowBattery && !capped && !offlineClosed)
+        // Lid open or an external display on means someone is here: not a dark wake in a bag
+        if sleeping && (!lidClosed() || externalDisplayAwake()) { sleeping = false }
+        setHold(!reasons.isEmpty && !overheated && !lowBattery && !capped && !offlineClosed && !sleeping)
+        if holding, awayStart != nil { awayWorked = true }
         applyLid()
         // Lid closed with no external display counts as "away". (Using clamshell mode with an external display is not away)
-        let closedAway = closedAway()
-        if closedAway, awayStart == nil { beginAway(slept: false) }
-        if !closedAway, awayStart != nil, !awaySlept { endAway() }
+        let closed = closedNoExternal()
+        if closed, awayStart == nil { beginAway(slept: false) }
+        if closed, awayStart != nil { awayLidClosed = true }
+        if !closed, awayStart != nil, !awaySlept { endAway() }
         render()
     }
 
@@ -748,12 +809,17 @@ final class App: NSObject, NSApplicationDelegate {
             if !warnedCapsomnia { logLine(T("蓋モード: Capsomnia が動いているため効きません(Capsomnia が disablesleep を戻すため)", "Lid mode: no effect because Capsomnia is running (Capsomnia resets disablesleep)")); warnedCapsomnia = true }
             want = false
         }
+        // Another tool (or a stray instance) may have reset disablesleep under us: re-check once a minute
+        if want, lidDisabled, Date().timeIntervalSince(lidCheckAt) > 60 {
+            lidCheckAt = Date()
+            if !Lid.current() { logLine(T("蓋モード: 外から 0 に戻されていたので入れ直す", "Lid mode: disablesleep was reset externally, setting it again")); lidDisabled = false }
+        }
         guard want != lidDisabled else { return }
         if Lid.set(want) {
             lidDisabled = want
             logLine(want ? T("蓋モード: 蓋を閉じても寝ないようにした", "Lid mode: Mac will stay awake with the lid closed") : T("蓋モード: 通常に戻した", "Lid mode: back to normal"))
             // If work finishes with the lid closed, macOS won't trigger lid-closed sleep again, so put it to sleep ourselves
-            if !want && closedAway() && !UserDefaults.standard.bool(forKey: "lidTest") {
+            if !want && !sleeping && closedNoExternal() && !UserDefaults.standard.bool(forKey: "lidTest") {
                 logLine(T("作業が終わり蓋が閉じているので、スリープさせる", "Work finished with the lid closed, putting Mac to sleep"))
                 let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset"); p.arguments = ["sleepnow"]
                 try? p.run()
@@ -785,6 +851,9 @@ final class App: NSObject, NSApplicationDelegate {
         item.button?.setAccessibilityLabel(desc)
         setRunning(holding && !paused, still: paused ? critter.off : critter.idle)
 
+        let signature = [desc, reasons.joined(separator: "|"), "\(lowBattery)\(overheated)\(lidMode)\(detector.capsomniaRunning)\(wakeNoteEnabled)\(heatGuardEnabled)\(pulseEnabled)\(critter.id)"].joined(separator: "#")
+        if signature == menuSignature { return }
+        menuSignature = signature
         let menu = NSMenu()
         func note(_ text: String) { menu.addItem(withTitle: text, action: nil, keyEquivalent: "") }
         // Header: app icon + name + one-line description, so it is clear what this menu bar item is

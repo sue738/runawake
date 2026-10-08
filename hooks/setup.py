@@ -221,6 +221,9 @@ def main():
         os.makedirs(os.path.dirname(MARK), exist_ok=True)
         shutil.copy2(os.path.join(HERE, "runawake-mark"), MARK)
         os.chmod(MARK, 0o755)
+    if action == "uninstall":
+        # Forget which agents' hooks were seen working, so the app falls back to CPU detection right away
+        shutil.rmtree(os.path.join(HOME, ".runawake", "hooks-ok"), ignore_errors=True)
     for name, marker, (install, uninstall) in AGENTS:
         if not os.path.isdir(marker):
             print(f"  -  {name}: not installed, skipped")

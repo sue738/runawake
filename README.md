@@ -41,7 +41,7 @@ python3 hooks/setup.py uninstall   # removes the agent hooks only
 Choose **Keep Awake with the Lid Closed** in the menu. It toggles `pmset -a disablesleep`, which needs root, so the first time you add a sudoers rule limited to exactly these two commands (the menu shows it):
 
 ```sh
-sudo sh -c 'echo "$USER ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0" > /etc/sudoers.d/runawake && chmod 440 /etc/sudoers.d/runawake'
+sudo sh -c "echo '$USER ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0' > /etc/sudoers.d/runawake && chmod 440 /etc/sudoers.d/runawake"
 ```
 
 Mind heat and battery when the Mac runs in a bag. Other tools that toggle `disablesleep` (e.g. Capsomnia) conflict with this mode; runawake detects Capsomnia and backs off.
