@@ -6,6 +6,7 @@
 import Cocoa
 import IOKit.pwr_mgt
 import IOKit.ps
+import Network
 
 let pollSeconds: TimeInterval = 5
 // Display language: Japanese if the system's primary language is Japanese, otherwise English (override with `defaults write local.runawake lang en` or the launch argument `-lang en`)
@@ -534,6 +535,12 @@ final class App: NSObject, NSApplicationDelegate {
     }
     var lowBattery = false
     var lowBatteryAt: Date?
+    /// Network: AI agents cannot work offline, so after 10 minutes without a connection they no longer keep the Mac awake.
+    /// (Terminal commands still count; a local build does not need the network.)
+    let netMonitor = NWPathMonitor()
+    var offlineSince: Date?
+    var offlineLong: Bool { offlineSince.map { Date().timeIntervalSince($0) >= 10 * 60 } ?? false }
+    var loggedOffline = false
     var batteryFloor: Int { (UserDefaults.standard.object(forKey: "batteryFloor") as? Int) ?? 20 }
     /// On battery at or below the floor: stop keeping the Mac awake. Resumes when plugged in.
     func checkBattery() {
@@ -626,6 +633,16 @@ final class App: NSObject, NSApplicationDelegate {
         if let url = Bundle.main.url(forResource: "runawake", withExtension: "icns"), let img = NSImage(contentsOf: url) { NSApp.applicationIconImage = img }
         // If disablesleep was left on after a previous crash, reset it
         if lidMode, Lid.set(false) { logLine(T("蓋モード: 起動時に disablesleep を 0 に戻した", "Lid mode: reset disablesleep to 0 at startup")) }
+        netMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if path.status == .satisfied {
+                    if self.loggedOffline { logLine(T("ネット: つながったので AI エージェントも数える", "Network: back online, counting AI agents again")) }
+                    self.offlineSince = nil; self.loggedOffline = false
+                } else if self.offlineSince == nil { self.offlineSince = Date() }
+            }
+        }
+        netMonitor.start(queue: .global(qos: .utility))
         tick()
         Timer.scheduledTimer(withTimeInterval: pollSeconds, repeats: true) { [weak self] _ in self?.tick() }
         NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil, queue: .main) { [weak self] _ in self?.tick() }
@@ -686,7 +703,12 @@ final class App: NSObject, NSApplicationDelegate {
     }
 
     func tick() {
-        reasons = paused ? [] : merged(busyMarkedAgents() + detector.scan(ignore: loadIgnore()))
+        var found = busyMarkedAgents() + detector.scan(ignore: loadIgnore())
+        if offlineLong {
+            if !loggedOffline { logLine(T("ネット: 10分以上つながっていないので、AI エージェントは数えない", "Network: offline for 10+ minutes, not counting AI agents")); loggedOffline = true }
+            found = found.filter { $0.contains(T("ターミナル", "in Terminal")) }
+        }
+        reasons = paused ? [] : merged(found)
         checkHeat()
         checkBattery()
         checkLidCap()

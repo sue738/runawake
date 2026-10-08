@@ -11,7 +11,7 @@
 - **Only while something runs** — AI agents while they are responding, and any foreground terminal command (rsync, builds, scripts…). Idle sessions do not keep the Mac awake.
 - **Hooks optional** — works out of the box with CPU heuristics. Once an agent's hooks are seen firing, runawake switches to exact start/stop detection for that agent.
 - **Lid-closed mode (optional)** — keeps working with the lid shut, and puts the Mac to sleep as soon as the work ends.
-- **Safety guards** — stops keeping the Mac awake when it gets hot (stricter with the lid closed), when the battery drops to 20% (resumes when plugged in), and after 3 hours with the lid closed on battery.
+- **Safety guards** — stops keeping the Mac awake when it gets hot (stricter with the lid closed), when the battery drops to 20% (resumes when plugged in), and after 3 hours with the lid closed on battery. AI agents stop counting after 10 minutes offline, since they cannot work without a network.
 - **Wake summary** — a calm card when you come back: how long the lid was closed, what finished, what is still running.
 - **Animated menu bar icon** — equalizer bars bounce while something runs, sit flat when idle, and are crossed out when off. Six other styles (bouncing ball, heartbeat, spinning dots, orbit, breathing circle, progress stripes) are in the Icon menu.
 - **English and Japanese** — follows your system language.
