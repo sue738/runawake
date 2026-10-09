@@ -514,6 +514,10 @@ final class App: NSObject, NSApplicationDelegate {
     let item: NSStatusItem = {
         let i = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         i.autosaveName = "runawake"
+        // The icon is the only UI, so it must never go missing: if it was ⌘-dragged off the menu bar
+        // (macOS remembers that as "NSStatusItem Visible runawake" = 0), bring it back, and disallow removal.
+        i.behavior = []
+        i.isVisible = true
         return i
     }()
     var lidDisabled = false   // Whether pmset disablesleep is currently 1
