@@ -784,6 +784,7 @@ final class App: NSObject, NSApplicationDelegate {
             found = found.filter { $0.contains(T("ターミナル", "in Terminal")) }
         }
         reasons = paused ? [] : merged(found)
+        writeState(found)
         if UserDefaults.standard.bool(forKey: "offlineTest") { offlineSince = Date().addingTimeInterval(-11 * 60) }
         checkHeat()
         checkBattery()
@@ -803,6 +804,28 @@ final class App: NSObject, NSApplicationDelegate {
         if closed, awayStart != nil { awayLidClosed = true }
         if !closed, awayStart != nil, !awaySlept { endAway() }
         render()
+    }
+
+    /// ~/.runawake/state.json: what runawake sees right now, for other tools (e.g. AgentWatch) to show.
+    /// Rewritten only when the content changes.
+    var lastState = ""
+    func writeState(_ found: [String]) {
+        var items: [[String: String]] = []
+        for f in found {
+            let parts = f.components(separatedBy: " — ")
+            var who = parts[0], kind = "agent"
+            if who.hasPrefix("ターミナルで ") || who.hasSuffix(" running in Terminal") {
+                kind = "terminal"
+                who = who.hasPrefix("ターミナルで ") ? String(who.dropFirst(7).dropLast(5)) : String(who.dropLast(20))
+            } else {
+                for suf in [" が作業中", " が動作中", " working", " running"] where who.hasSuffix(suf) { who = String(who.dropLast(suf.count)); break }
+            }
+            items.append(["kind": kind, "name": who, "place": parts.count > 1 ? parts[1] : ""])
+        }
+        let state: [String: Any] = ["updated": ISO8601DateFormatter().string(from: Date()), "holding": holding, "paused": paused, "count": items.count, "items": items]
+        guard let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys]), let text = String(data: data, encoding: .utf8), text != lastState else { return }
+        lastState = text
+        try? data.write(to: URL(fileURLWithPath: NSHomeDirectory() + "/.runawake/state.json"), options: .atomic)
     }
 
     /// disablesleep 1 only while lid mode is on and keeping awake; otherwise reset to 0.
