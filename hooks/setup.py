@@ -73,7 +73,7 @@ def claude_like(path, agent, events):
 
 CLAUDE_EVENTS = [("UserPromptSubmit", "busy"), ("PostToolUse", "busy"), ("Stop", "idle")]
 # Claude Code sends no Stop when interrupted with Esc. Go idle on input/permission-wait notifications to avoid staying awake.
-CLAUDE_ONLY_EVENTS = CLAUDE_EVENTS + [("Notification", "idle")]
+CLAUDE_ONLY_EVENTS = CLAUDE_EVENTS + [("Notification", "idle"), ("SubagentStart", "busy"), ("SubagentStop", "idle")]
 NOTIFICATION_MATCHER = "permission_prompt|idle_prompt|agent_needs_input"
 
 

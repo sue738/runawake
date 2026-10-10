@@ -18,6 +18,12 @@ if not isinstance(data, dict):
     data = {}
 
 sid = next((str(data[k]) for k in ("session_id", "sessionId", "conversation_id", "conversationId", "sessionID") if data.get(k)), "")
+# Claude Code subagents: their hook events carry agent_id. Each gets its own mark so they can be counted;
+# a Subagent* event without agent_id is ignored rather than clearing the main session's mark.
+event = str(data.get("hook_event_name") or "")
+sub = str(data.get("agent_id") or "")
+if event.startswith("Subagent") and not sub:
+    sid = ""
 roots = data.get("workspace_roots") or data.get("workspacePaths") or []
 cwd = data.get("cwd") or (roots[0] if roots else "") or os.environ.get("PWD", "")
 
@@ -54,15 +60,23 @@ except OSError:
 if sid:
     d = os.path.expanduser("~/.runawake/busy")
     os.makedirs(d, exist_ok=True)
-    f = os.path.join(d, re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:200])
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", f"{agent}-{sid}")[:200]
+    f = os.path.join(d, base + ("-" + re.sub(r"[^A-Za-z0-9._-]", "_", sub)[:40] if sub else ""))
     if mode == "idle":
-        try:
-            os.remove(f)
-        except FileNotFoundError:
-            pass
+        targets = [f]
+        if not sub:  # the main session stopped: its subagents are gone too
+            try:
+                targets += [os.path.join(d, n) for n in os.listdir(d) if n.startswith(base + "-")]
+            except OSError:
+                pass
+        for t in targets:
+            try:
+                os.remove(t)
+            except FileNotFoundError:
+                pass
     else:
         with open(f, "w") as fh:
-            fh.write(f"{ancestor_pid()}\t{agent}\t{cwd}\n")
+            fh.write(f"{ancestor_pid()}\t{agent}\t{cwd}\t{'sub' if sub else 'main'}\n")
 
 if reply:
     sys.stdout.write(reply)

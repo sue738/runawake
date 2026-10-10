@@ -106,7 +106,8 @@ func busyMarkedAgents() -> [String] {
         guard let pid = Int32(f.first ?? ""), kill(pid, 0) == 0, Date().timeIntervalSince(mtime) < staleMarkSeconds else {
             try? fm.removeItem(atPath: path); continue
         }
-        let agent = displayName(f.count > 1 ? f[1] : "agent")
+        var agent = displayName(f.count > 1 ? f[1] : "agent")
+        if f.count > 3, f[3] == "sub" { agent += T(" のサブエージェント", " subagent") }
         let place = f.count > 2 ? (f[2].hasPrefix("/") ? shortPath(f[2]) : (f[2].isEmpty ? nil : f[2])) : nil
         out.append(describe(who: agent, what: T(" が作業中", " working"), place: place))
     }
@@ -814,6 +815,7 @@ final class App: NSObject, NSApplicationDelegate {
         for f in found {
             let parts = f.components(separatedBy: " — ")
             var who = parts[0], kind = "agent"
+            if who.contains(T(" のサブエージェント", " subagent")) { kind = "subagent"; who = who.replacingOccurrences(of: T(" のサブエージェント", " subagent"), with: "") }
             if who.hasPrefix("ターミナルで ") || who.hasSuffix(" running in Terminal") {
                 kind = "terminal"
                 who = who.hasPrefix("ターミナルで ") ? String(who.dropFirst(7).dropLast(5)) : String(who.dropLast(20))
